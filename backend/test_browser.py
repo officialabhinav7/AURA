@@ -1,13 +1,8 @@
 import asyncio
 
-# Import the browser controller.
 from app.browser.browser import BrowserController
-
-# Import the perception layer.
 from app.browser.perception import PagePerception
-
-# Import our Gemini client.
-from app.llm.gemini import GeminiClient
+from app.browser.extractor import QuestionExtractor
 
 
 async def main():
@@ -15,50 +10,49 @@ async def main():
     # Create the browser controller.
     browser = BrowserController()
 
-    # Start Chromium.
+    # Start Playwright and open the browser.
     await browser.start()
 
-    # Open the test webpage.
+    # Open our test webpage.
     await browser.open(
         "https://www.w3schools.com/html/html_forms.asp"
     )
 
-    # Create the perception layer using
-    # the current Playwright page.
+    # Create the perception layer.
+    # This layer understands what elements exist on the page.
     perception = PagePerception(
         browser.page
     )
 
-    # Ask AURA to perceive the webpage.
-    elements = await perception.get_elements()
-
-    print("AVAILABLE ELEMENTS:")
-    print()
-
-    # Display the elements that Gemini will receive.
-    for element in elements:
-        print(element)
-
-    # Create the Gemini client.
-    gemini = GeminiClient()
-
-    # Give Gemini a simple task.
-    action = await gemini.generate_action(
-        task="Enter Abhinav Mishra into the name field.",
-        elements=elements
+    # Create the question extractor.
+    # This converts perceived elements into QuestionField objects.
+    extractor = QuestionExtractor(
+        perception
     )
 
-    # Display Gemini's structured decision.
-    print("\nGEMINI ACTION:")
-    print(action)
+    # Extract all possible question/input fields.
+    questions = await extractor.extract()
 
-    # Keep the browser open temporarily
-    # so we can inspect the page.
+    # Print the number of fields discovered.
+    print("\nTotal questions found:", len(questions))
+
+    # Print every extracted question.
+    print("\n========== EXTRACTED QUESTIONS ==========\n")
+
+    for question in questions:
+
+        # Pydantic model is printed here.
+        print(question)
+
+    print("\n=========================================\n")
+
+    # Keep the browser open for a few seconds
+    # so we can visually inspect the webpage.
     await asyncio.sleep(5)
 
     # Close the browser.
     await browser.close()
 
 
-# Start the asynchronous program.
+# Start the program.
 asyncio.run(main())

@@ -37,7 +37,7 @@ class GeminiClient:
         )
 
         # Keep the model name in one place.
-        self.model = "gemini-3.8-flash"
+        self.model = "gemini-3.5-flash"
 
     async def generate_action(
         self,
