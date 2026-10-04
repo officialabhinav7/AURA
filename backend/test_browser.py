@@ -2,57 +2,159 @@ import asyncio
 
 from app.browser.browser import BrowserController
 from app.browser.perception import PagePerception
+from app.browser.actions import BrowserActions
 from app.browser.extractor import QuestionExtractor
+from app.llm.gemini import GeminiClient
 
 
 async def main():
 
-    # Create the browser controller.
+    # =========================================================
+    # 1. START BROWSER
+    # =========================================================
+
     browser = BrowserController()
 
-    # Start Playwright and open the browser.
     await browser.start()
 
-    # Open our test webpage.
+    # Open the webpage that contains the real questions.
     await browser.open(
         "https://www.w3schools.com/html/html_forms.asp"
     )
 
-    # Create the perception layer.
-    # This layer understands what elements exist on the page.
+    # =========================================================
+    # 2. CREATE PERCEPTION SYSTEM
+    # =========================================================
+
     perception = PagePerception(
         browser.page
     )
 
-    # Create the question extractor.
-    # This converts perceived elements into QuestionField objects.
+    # =========================================================
+    # 3. CREATE QUESTION EXTRACTOR
+    # =========================================================
+
     extractor = QuestionExtractor(
         perception
     )
 
-    # Extract all possible question/input fields.
+    # Extract the actual questions/fields
+    # from the webpage.
     questions = await extractor.extract()
 
-    # Print the number of fields discovered.
-    print("\nTotal questions found:", len(questions))
+    print("\n========== REAL QUESTIONS ==========\n")
 
-    # Print every extracted question.
-    print("\n========== EXTRACTED QUESTIONS ==========\n")
+    for index, question in enumerate(questions):
 
-    for question in questions:
+        print(
+            f"Question {index + 1}:"
+        )
 
-        # Pydantic model is printed here.
         print(question)
 
-    print("\n=========================================\n")
+        print()
 
-    # Keep the browser open for a few seconds
-    # so we can visually inspect the webpage.
+    print("=====================================\n")
+
+    # =========================================================
+    # 4. CREATE BROWSER ACTION SYSTEM
+    # =========================================================
+
+    actions = BrowserActions(
+        perception
+    )
+
+    # =========================================================
+    # 5. CREATE GEMINI CLIENT
+    # =========================================================
+
+    gemini = GeminiClient()
+
+    # =========================================================
+    # 6. USER PROFILE
+    # =========================================================
+
+    # This represents information AURA already knows
+    # about the user.
+    #
+    # Later this can come from the FastAPI request.
+    user_profile = {
+        "first_name": "Abhinav",
+        "last_name": "Mishra"
+    }
+
+    # =========================================================
+    # 7. PROCESS QUESTIONS ONE BY ONE
+    # =========================================================
+
+    for index, question in enumerate(questions):
+
+        print(
+            f"\n========== PROCESSING QUESTION {index + 1} ==========\n"
+        )
+
+        print(
+            "Question:",
+            question
+        )
+
+        # -----------------------------------------------------
+        # Ask Gemini to reason about THIS actual question.
+        # -----------------------------------------------------
+
+        action = await gemini.generate_action(
+            question=question,
+            elements=await perception.get_elements(),
+            user_profile=user_profile
+        )
+
+        print("\nGemini decided:")
+
+        print(action)
+
+        # -----------------------------------------------------
+        # Execute the action using Playwright.
+        # -----------------------------------------------------
+
+        try:
+
+            await actions.execute(
+                action
+            )
+
+            print(
+                "Action executed successfully!"
+            )
+
+        except Exception as error:
+
+            print(
+                "Action failed:",
+                error
+            )
+
+        # -----------------------------------------------------
+        # Wait briefly so we can observe what happened.
+        # -----------------------------------------------------
+
+        await asyncio.sleep(1)
+
+    # =========================================================
+    # 8. KEEP BROWSER OPEN
+    # =========================================================
+
+    print(
+        "\nAURA finished processing the extracted questions."
+    )
+
     await asyncio.sleep(5)
 
-    # Close the browser.
+    # =========================================================
+    # 9. CLOSE BROWSER
+    # =========================================================
+
     await browser.close()
 
 
-# Start the program.
+# Start the asynchronous program.
 asyncio.run(main())

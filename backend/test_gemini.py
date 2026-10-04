@@ -1,69 +1,102 @@
-# Import Google's Gemini SDK.
-from google import genai
+import asyncio
 
-# Load variables from the .env file.
-from dotenv import load_dotenv
-
-# Used to read the API key from environment variables.
-import os
+from app.browser.browser import BrowserController
+from app.browser.perception import PagePerception
+from app.browser.actions import BrowserActions
+from app.browser.schemas import BrowserAction
 
 
-# Load the .env file.
-load_dotenv()
+async def main():
 
+    # ---------------------------------------------------------
+    # 1. START THE BROWSER
+    # ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# Get the Gemini API key.
-# ---------------------------------------------------------
+    # Create the browser controller.
+    browser = BrowserController()
 
-api_key = os.getenv("GEMINI_API_KEY")
+    # Launch Chromium.
+    await browser.start()
 
-
-# Make sure the API key exists.
-if not api_key:
-
-    raise ValueError(
-        "GEMINI_API_KEY is not set"
+    # Open the test webpage.
+    await browser.open(
+        "https://www.w3schools.com/html/html_forms.asp"
     )
 
+    # ---------------------------------------------------------
+    # 2. CREATE THE PERCEPTION SYSTEM
+    # ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# Create the Gemini client.
-# ---------------------------------------------------------
+    # PagePerception allows AURA to inspect the webpage.
+    perception = PagePerception(
+        browser.page
+    )
 
-client = genai.Client(
-    api_key=api_key
-)
+    # ---------------------------------------------------------
+    # 3. CREATE THE ACTION SYSTEM
+    # ---------------------------------------------------------
+
+    # BrowserActions executes validated actions
+    # using Playwright.
+    actions = BrowserActions(
+        perception
+    )
+
+    # ---------------------------------------------------------
+    # 4. PERCEIVE THE PAGE
+    # ---------------------------------------------------------
+
+    # Detect the elements currently available on the page.
+    elements = await perception.get_elements()
+
+    print("\n========== PAGE ELEMENTS ==========\n")
+
+    for element in elements:
+        print(element)
+
+    print("\n===================================\n")
+
+    # ---------------------------------------------------------
+    # 5. CREATE A VALIDATED BROWSER ACTION
+    # ---------------------------------------------------------
+
+    # This is the same action Gemini successfully generated
+    # in our previous test.
+    #
+    # We are manually creating it here first so that we can
+    # verify that Playwright can execute it correctly.
+    action = BrowserAction(
+        action="type",
+        element_id="e9",
+        value="Abhinav"
+    )
+
+    print("\n========== ACTION ==========\n")
+    print(action)
+    print("\n============================\n")
+
+    # ---------------------------------------------------------
+    # 6. EXECUTE THE ACTION
+    # ---------------------------------------------------------
+
+    print("Executing action...")
+
+    await actions.execute(
+        action
+    )
+
+    print("Action executed successfully!")
+
+    # Keep the browser open for 5 seconds
+    # so we can see the result.
+    await asyncio.sleep(5)
+
+    # ---------------------------------------------------------
+    # 7. CLOSE THE BROWSER
+    # ---------------------------------------------------------
+
+    await browser.close()
 
 
-# ---------------------------------------------------------
-# Send a very simple request.
-#
-# IMPORTANT:
-# We are NOT using:
-# - Playwright
-# - LangGraph
-# - BrowserAction
-# - tools
-# - function calling
-# - structured output
-#
-# We are testing Gemini alone.
-# ---------------------------------------------------------
-
-response = client.models.generate_content(
-
-    # Current stable Flash model.
-    model="gemini-3.8-flash",
-
-    # Very simple test prompt.
-    contents="Reply with exactly: AURA LLM OK"
-)
-
-
-# ---------------------------------------------------------
-# Print Gemini's response.
-# ---------------------------------------------------------
-
-print("\nGemini response:")
-print(response.text)
+# Start the asynchronous program.
+asyncio.run(main())

@@ -1,76 +1,64 @@
+from typing import Optional
+
+
 class PagePerception:
-    """
-    Responsible for observing the current webpage.
-
-    It does NOT decide what the user wants.
-
-    Its job is only to collect useful information about
-    interactive elements on the webpage.
-    """
 
     def __init__(self, page):
-
-        # Store the Playwright Page object.
+        # Store the Playwright page.
+        # We use this page to inspect the current webpage.
         self.page = page
 
-        # Map AURA IDs such as "e1" to actual
-        # Playwright elements.
+        # Store all detected elements using our own IDs
+        # such as e1, e2, e3...
         self.element_map = {}
 
-    async def get_page_info(self):
-
-        # Return basic information about the webpage.
-        return {
-            "url": self.page.url,
-            "title": await self.page.title()
-        }
 
     async def get_label(self, element):
+        """
+        Find the most useful label for an element.
 
-        # --------------------------------------------------
+        We check several sources because webpages can describe
+        form fields in different ways:
+        - aria-label
+        - <label for="...">
+        - aria-labelledby
+        - placeholder
+        - name
+        """
+
         # 1. Try aria-label.
-        # --------------------------------------------------
+        aria_label = await element.get_attribute("aria-label")
 
-        label = await element.get_attribute(
-            "aria-label"
-        )
+        if aria_label:
+            return aria_label.strip()
 
-        if label:
-            return label.strip()
 
-        # --------------------------------------------------
-        # 2. Try an HTML <label>.
-        # --------------------------------------------------
-
-        element_id = await element.get_attribute(
-            "id"
-        )
+        # 2. Try a <label> connected using the element's ID.
+        element_id = await element.get_attribute("id")
 
         if element_id:
 
-            label_locator = self.page.locator(
+            label = self.page.locator(
                 f'label[for="{element_id}"]'
             )
 
-            if await label_locator.count() > 0:
+            if await label.count() > 0:
 
-                return (
-                    await label_locator.first.inner_text()
-                ).strip()
+                label_text = await label.first.inner_text()
 
-        # --------------------------------------------------
+                if label_text.strip():
+                    return label_text.strip()
+
+
         # 3. Try aria-labelledby.
-        # --------------------------------------------------
-
         labelled_by = await element.get_attribute(
             "aria-labelledby"
         )
 
         if labelled_by:
 
-            label_parts = []
+            texts = []
 
-            # aria-labelledby can contain multiple IDs.
             for label_id in labelled_by.split():
 
                 label_element = self.page.locator(
@@ -79,21 +67,16 @@ class PagePerception:
 
                 if await label_element.count() > 0:
 
-                    text = (
-                        await label_element.first.inner_text()
-                    ).strip()
+                    text = await label_element.inner_text()
 
-                    if text:
-                        label_parts.append(text)
+                    if text.strip():
+                        texts.append(text.strip())
 
-            if label_parts:
+            if texts:
+                return " ".join(texts)
 
-                return " ".join(label_parts)
 
-        # --------------------------------------------------
         # 4. Try placeholder.
-        # --------------------------------------------------
-
         placeholder = await element.get_attribute(
             "placeholder"
         )
@@ -101,52 +84,67 @@ class PagePerception:
         if placeholder:
             return placeholder.strip()
 
-        # --------------------------------------------------
-        # 5. Try name.
-        # --------------------------------------------------
 
-        name = await element.get_attribute(
-            "name"
-        )
+        # 5. Try name.
+        name = await element.get_attribute("name")
 
         if name:
             return name.strip()
 
-        # No useful label found.
+
+        # Nothing useful was found.
         return None
+
 
     async def get_context(self, element):
         """
-        Collect useful text near an element.
+        Get nearby text around an element.
 
-        We prefer local context because a complete parent
-        or webpage section can contain unrelated information.
+        Context helps Gemini understand what a field means.
+
+        Example:
+
+        First name: [________]
+        Last name:  [________]
+
+        The input itself may only have name="fname",
+        but its surrounding text gives useful meaning.
         """
 
-        # --------------------------------------------------
-        # 1. Get the immediate parent.
-        # --------------------------------------------------
+        context = await element.evaluate(
+            """
+            (element) => {
 
-        parent = element.locator("..")
+                // Get the immediate parent.
+                const parent = element.parentElement;
 
-        parent_text = (
-            await parent.inner_text()
-        ).strip()
+                // Get the parent's parent.
+                const grandparent =
+                    parent ? parent.parentElement : null;
 
-        # --------------------------------------------------
-        # 2. Get the grandparent.
-        # --------------------------------------------------
+                return {
+                    parent_text:
+                        parent ? parent.innerText : "",
 
-        grandparent = parent.locator("..")
+                    grandparent_text:
+                        grandparent ? grandparent.innerText : ""
+                };
+            }
+            """
+        )
 
-        grandparent_text = (
-            await grandparent.inner_text()
-        ).strip()
 
-        # --------------------------------------------------
-        # 3. Clean extra whitespace.
-        # --------------------------------------------------
+        # Get immediate parent text.
+        parent_text = context.get("parent_text", "")
 
+        # Get grandparent text.
+        grandparent_text = context.get(
+            "grandparent_text",
+            ""
+        )
+
+
+        # Normalize whitespace.
         parent_text = " ".join(
             parent_text.split()
         )
@@ -155,301 +153,364 @@ class PagePerception:
             grandparent_text.split()
         )
 
-        # --------------------------------------------------
-        # 4. Prefer immediate parent text.
-        # --------------------------------------------------
 
+        # Keep context reasonably small.
+        parent_text = parent_text[:250]
+
+        grandparent_text = grandparent_text[:300]
+
+
+        # Prefer immediate parent context.
         if parent_text:
-
-            # Limit local context.
-            if len(parent_text) > 250:
-                parent_text = parent_text[:250]
-
-            return {
-                "parent_text": parent_text,
-                "grandparent_text": (
-                    grandparent_text[:300]
-                    if grandparent_text
-                    else ""
-                )
-            }
-
-        # --------------------------------------------------
-        # 5. If parent is empty, use grandparent.
-        # --------------------------------------------------
+            return parent_text
 
         if grandparent_text:
+            return grandparent_text
 
-            if len(grandparent_text) > 300:
-                grandparent_text = (
-                    grandparent_text[:300]
-                )
+        return None
 
-            return {
-                "parent_text": "",
-                "grandparent_text": grandparent_text
-            }
 
-        # --------------------------------------------------
-        # 6. Nothing useful found.
-        # --------------------------------------------------
+    async def is_actionable(self, element):
+        """
+        Determine whether an element is currently usable.
 
-        return {
-            "parent_text": "",
-            "grandparent_text": ""
-        }
+        This is the important improvement.
+
+        An element can exist in the DOM but still be:
+        - hidden
+        - disabled
+        - not currently usable
+
+        We don't want such elements to be sent to Gemini
+        as possible actions.
+        """
+
+        # -------------------------------------------------
+        # CHECK VISIBILITY
+        # -------------------------------------------------
+        # Playwright checks whether the element is currently
+        # visible to the user.
+        if not await element.is_visible():
+            return False
+
+
+        # -------------------------------------------------
+        # CHECK ENABLED STATE
+        # -------------------------------------------------
+        # Disabled form controls should not be considered
+        # actionable.
+        try:
+
+            if not await element.is_enabled():
+                return False
+
+        except Exception:
+
+            # Some non-form elements may not support the
+            # enabled-state check in the same way.
+            pass
+
+
+        # If the element is visible and usable,
+        # consider it actionable.
+        return True
+
+
+    async def get_input_role(self, element):
+        """
+        Determine the semantic role of an input element.
+
+        We first check an explicit ARIA role.
+
+        If no role exists, we infer it from the HTML input type.
+        """
+
+        # Check explicit ARIA role.
+        role = await element.get_attribute("role")
+
+        if role:
+            return role
+
+
+        # Get native input type.
+        input_type = await element.get_attribute("type")
+
+        if input_type in ["text", "email", "password", "search"]:
+            return "textbox"
+
+        if input_type == "number":
+            return "spinbutton"
+
+        if input_type == "radio":
+            return "radio"
+
+        if input_type == "checkbox":
+            return "checkbox"
+
+        if input_type == "date":
+            return "textbox"
+
+        return "textbox"
+
 
     async def get_elements(self):
+        """
+        Detect currently actionable interactive elements.
 
-        # Store all perceived elements.
-        elements = []
+        Important:
+        We DO NOT remove duplicate-looking elements here.
 
-        # Reset the element map because the page
-        # may have changed.
+        If two different DOM elements exist, both can remain.
+
+        Example:
+
+        e9  -> fname
+        e12 -> fname
+
+        They are preserved because they may represent
+        different physical fields.
+        """
+
+        # Reset the element map for the current perception.
         self.element_map = {}
 
-        # AURA element counter.
-        counter = 1
+        # Generate our own IDs.
+        element_counter = 1
 
-        # ==================================================
-        # NATIVE INPUT ELEMENTS
-        # ==================================================
 
-        inputs = await self.page.locator(
-            "input"
-        ).all()
+        # -------------------------------------------------
+        # FIND NATIVE INTERACTIVE ELEMENTS
+        # -------------------------------------------------
+        locator = self.page.locator(
+            "input, textarea, select, button, a"
+        )
 
-        for element in inputs:
+        count = await locator.count()
 
-            # Create an AURA element ID.
-            element_id = f"e{counter}"
 
-            counter += 1
+        for index in range(count):
 
-            # Get actual HTML input type.
-            element_type = await element.get_attribute(
-                "type"
+            element = locator.nth(index)
+
+
+            # -------------------------------------------------
+            # IMPORTANT:
+            # IGNORE HIDDEN/NON-ACTIONABLE ELEMENTS
+            # -------------------------------------------------
+            if not await self.is_actionable(element):
+                continue
+
+
+            # Get HTML tag.
+            tag = await element.evaluate(
+                "(element) => element.tagName"
             )
 
-            # Get HTML name.
-            name = await element.get_attribute(
-                "name"
-            )
+            tag = tag.upper()
 
-            # Get placeholder.
-            placeholder = await element.get_attribute(
-                "placeholder"
-            )
 
-            # Check whether the input is required.
-            required = await element.get_attribute(
-                "required"
-            )
+            # -------------------------------------------------
+            # DETERMINE ROLE
+            # -------------------------------------------------
+            if tag == "INPUT":
 
-            # Find semantic label.
+                role = await self.get_input_role(
+                    element
+                )
+
+            elif tag == "TEXTAREA":
+
+                role = "textbox"
+
+            elif tag == "SELECT":
+
+                role = "combobox"
+
+            elif tag == "BUTTON":
+
+                role = "button"
+
+            elif tag == "A":
+
+                role = "link"
+
+            else:
+
+                continue
+
+
+            # Create our internal element ID.
+            element_id = f"e{element_counter}"
+
+            element_counter += 1
+
+
+            # Get useful information.
             label = await self.get_label(
                 element
             )
 
-            # Get surrounding context.
             context = await self.get_context(
                 element
             )
 
-            # Build semantic element information.
-            element_data = {
-                "id": element_id,
+            name = await element.get_attribute(
+                "name"
+            )
 
-                "role": self.get_input_role(
-                    element_type
+            placeholder = await element.get_attribute(
+                "placeholder"
+            )
+
+            required = await element.get_attribute(
+                "required"
+            )
+
+
+            # Store element information.
+            self.element_map[element_id] = {
+                "element": element,
+                "id": element_id,
+                "role": role,
+                "type": await element.get_attribute(
+                    "type"
                 ),
-
-                # Keep the original HTML type.
-                "type": element_type,
-
                 "name": name,
-
                 "label": label,
-
                 "placeholder": placeholder,
-
-                "required": required is not None,
-
-                "context": context
+                "required": bool(required),
+                "context": {
+                    "parent_text": context
+                }
             }
 
-            # Add the element to our list.
-            elements.append(
-                element_data
-            )
 
-            # Map AURA ID to the real Playwright element.
-            self.element_map[
-                element_id
-            ] = element
-
-        # ==================================================
-        # NATIVE BUTTONS
-        # ==================================================
-
-        buttons = await self.page.locator(
-            "button"
-        ).all()
-
-        for element in buttons:
-
-            element_id = f"e{counter}"
-
-            counter += 1
-
-            # Get visible button text.
-            text = (
-                await element.inner_text()
-            ).strip()
-
-            # Get surrounding context.
-            context = await self.get_context(
-                element
-            )
-
-            element_data = {
-                "id": element_id,
-                "role": "button",
-                "text": text,
-                "context": context
-            }
-
-            elements.append(
-                element_data
-            )
-
-            self.element_map[
-                element_id
-            ] = element
-
-        # ==================================================
-        # NATIVE LINKS
-        # ==================================================
-
-        links = await self.page.locator(
-            "a"
-        ).all()
-
-        for element in links:
-
-            element_id = f"e{counter}"
-
-            counter += 1
-
-            # Get visible link text.
-            text = (
-                await element.inner_text()
-            ).strip()
-
-            # Get surrounding context.
-            context = await self.get_context(
-                element
-            )
-
-            element_data = {
-                "id": element_id,
-                "role": "link",
-                "text": text,
-                "context": context
-            }
-
-            elements.append(
-                element_data
-            )
-
-            self.element_map[
-                element_id
-            ] = element
-
-        # ==================================================
-        # ARIA ELEMENTS
-        # ==================================================
-
-        aria_elements = await self.page.locator(
+        # -------------------------------------------------
+        # FIND ARIA INTERACTIVE ELEMENTS
+        # -------------------------------------------------
+        #
+        # Some modern websites don't use native HTML
+        # elements. They use things like:
+        #
+        # <div role="button">
+        # <div role="textbox">
+        # <div role="checkbox">
+        #
+        # So we inspect those as well.
+        #
+        aria_locator = self.page.locator(
             '[role="button"], '
             '[role="textbox"], '
-            '[role="radio"], '
             '[role="checkbox"], '
-            '[role="combobox"], '
-            '[role="link"]'
-        ).all()
+            '[role="radio"], '
+            '[role="combobox"]'
+        )
 
-        for element in aria_elements:
+        aria_count = await aria_locator.count()
 
-            element_id = f"e{counter}"
 
-            counter += 1
+        for index in range(aria_count):
 
-            # Get ARIA role.
+            element = aria_locator.nth(index)
+
+
+            # Ignore hidden ARIA elements too.
+            if not await self.is_actionable(element):
+                continue
+
+
             role = await element.get_attribute(
                 "role"
             )
 
-            # Get accessible label.
-            aria_label = await element.get_attribute(
-                "aria-label"
+            element_id = f"e{element_counter}"
+
+            element_counter += 1
+
+
+            label = await self.get_label(
+                element
             )
 
-            # Get visible text.
-            text = (
-                await element.inner_text()
-            ).strip()
-
-            # Get surrounding context.
             context = await self.get_context(
                 element
             )
 
-            element_data = {
-                "id": element_id,
-                "role": role,
-                "label": aria_label,
-                "text": text,
-                "context": context
-            }
-
-            elements.append(
-                element_data
+            name = await element.get_attribute(
+                "name"
             )
 
-            self.element_map[
-                element_id
-            ] = element
+            placeholder = await element.get_attribute(
+                "placeholder"
+            )
 
-        # Return all perceived elements.
+            required = await element.get_attribute(
+                "required"
+            )
+
+
+            self.element_map[element_id] = {
+                "element": element,
+                "id": element_id,
+                "role": role,
+                "type": await element.get_attribute(
+                    "type"
+                ),
+                "name": name,
+                "label": label,
+                "placeholder": placeholder,
+                "required": bool(required),
+                "context": {
+                    "parent_text": context
+                }
+            }
+
+
+        # -------------------------------------------------
+        # RETURN CLEAN ELEMENT INFORMATION
+        # -------------------------------------------------
+        #
+        # Don't expose the actual Playwright objects to
+        # Gemini.
+        #
+        # Gemini only needs descriptive information.
+        #
+        elements = []
+
+        for element_id, data in self.element_map.items():
+
+            elements.append({
+                "id": data["id"],
+                "role": data["role"],
+                "type": data["type"],
+                "name": data["name"],
+                "label": data["label"],
+                "placeholder": data["placeholder"],
+                "required": data["required"],
+                "context": data["context"]
+            })
+
+
         return elements
 
-    def get_input_role(self, input_type):
-        """
-        Convert HTML input types into semantic roles.
-
-        The original HTML type is still stored separately.
-        """
-
-        roles = {
-            "text": "textbox",
-            "email": "textbox",
-            "password": "textbox",
-            "number": "spinbutton",
-            "radio": "radio",
-            "checkbox": "checkbox",
-            "date": "date"
-        }
-
-        return roles.get(
-            input_type,
-            "input"
-        )
 
     def get_element(self, element_id):
+        """
+        Return the actual Playwright element associated
+        with an AURA element ID.
 
-        # Return the actual Playwright element
-        # associated with an AURA element ID.
-        return self.element_map.get(
+        Example:
+
+        e9
+        ↓
+        actual Playwright input element
+        """
+
+        data = self.element_map.get(
             element_id
         )
+
+        if data is None:
+            return None
+
+        return data["element"]
