@@ -1,166 +1,208 @@
+
 from typing import Optional
 
 
 class PagePerception:
+    """
+    PagePerception is responsible for OBSERVING the webpage.
+
+    Important:
+    This class should collect facts from the webpage.
+    It should NOT decide whether an element is relevant to the
+    user's task. That reasoning will be handled later by relevance.py.
+    """
 
     def __init__(self, page):
-        # Store the Playwright page.
-        # We use this page to inspect the current webpage.
+        """
+        Store the Playwright page object.
+
+        element_map:
+            AURA gives every discovered element an internal ID such as
+            e1, e2, e3...
+
+            Example:
+
+                e1 -> search box
+                e2 -> first name input
+                e3 -> submit button
+
+            The actual Playwright element is stored internally so
+            BrowserActions can later use the AURA ID.
+        """
+
         self.page = page
 
-        # Store all detected elements using our own IDs
-        # such as e1, e2, e3...
+        # Maps AURA element IDs to actual Playwright elements.
         self.element_map = {}
 
+    # ============================================================
+    # 1. GET LABEL
+    # ============================================================
 
     async def get_label(self, element):
         """
-        Find the most useful label for an element.
+        Try to find the human-readable label of an element.
 
-        We check several sources because webpages can describe
-        form fields in different ways:
-        - aria-label
-        - <label for="...">
-        - aria-labelledby
-        - placeholder
-        - name
+        We check several possible sources because websites can
+        describe an input in different ways.
+
+        Priority:
+
+        1. aria-label
+        2. <label for="...">
+        3. aria-labelledby
+        4. placeholder
+        5. name
         """
 
-        # 1. Try aria-label.
+        # --------------------------------------------------------
+        # Check aria-label
+        # --------------------------------------------------------
+
         aria_label = await element.get_attribute("aria-label")
 
         if aria_label:
             return aria_label.strip()
 
+        # --------------------------------------------------------
+        # Check <label for="element-id">
+        # --------------------------------------------------------
 
-        # 2. Try a <label> connected using the element's ID.
         element_id = await element.get_attribute("id")
 
         if element_id:
-
             label = self.page.locator(
                 f'label[for="{element_id}"]'
             )
 
             if await label.count() > 0:
-
                 label_text = await label.first.inner_text()
 
-                if label_text.strip():
+                if label_text:
                     return label_text.strip()
 
+        # --------------------------------------------------------
+        # Check aria-labelledby
+        # --------------------------------------------------------
 
-        # 3. Try aria-labelledby.
-        labelled_by = await element.get_attribute(
-            "aria-labelledby"
-        )
+        labelledby = await element.get_attribute("aria-labelledby")
 
-        if labelled_by:
+        if labelledby:
+            label_ids = labelledby.split()
 
             texts = []
 
-            for label_id in labelled_by.split():
+            for label_id in label_ids:
 
-                label_element = self.page.locator(
+                label = self.page.locator(
                     f"#{label_id}"
                 )
 
-                if await label_element.count() > 0:
+                if await label.count() > 0:
 
-                    text = await label_element.inner_text()
+                    text = await label.first.inner_text()
 
-                    if text.strip():
+                    if text:
                         texts.append(text.strip())
 
             if texts:
                 return " ".join(texts)
 
+        # --------------------------------------------------------
+        # Check placeholder
+        # --------------------------------------------------------
 
-        # 4. Try placeholder.
-        placeholder = await element.get_attribute(
-            "placeholder"
-        )
+        placeholder = await element.get_attribute("placeholder")
 
         if placeholder:
             return placeholder.strip()
 
+        # --------------------------------------------------------
+        # Check name
+        # --------------------------------------------------------
 
-        # 5. Try name.
         name = await element.get_attribute("name")
 
         if name:
             return name.strip()
 
+        # --------------------------------------------------------
+        # Nothing found
+        # --------------------------------------------------------
 
-        # Nothing useful was found.
         return None
 
+    # ============================================================
+    # 2. GET CONTEXT
+    # ============================================================
 
     async def get_context(self, element):
         """
-        Get nearby text around an element.
-
-        Context helps Gemini understand what a field means.
+        Get surrounding text of an element.
 
         Example:
 
-        First name: [________]
-        Last name:  [________]
+            <div>
+                Student Information
+                <input name="roll">
+            </div>
 
-        The input itself may only have name="fname",
-        but its surrounding text gives useful meaning.
+        The context may help AURA understand that the input
+        belongs to "Student Information".
+
+        We collect text from the parent and grandparent.
         """
 
         context = await element.evaluate(
             """
             (element) => {
 
-                // Get the immediate parent.
                 const parent = element.parentElement;
 
-                // Get the parent's parent.
                 const grandparent =
                     parent ? parent.parentElement : null;
 
                 return {
-                    parent_text:
-                        parent ? parent.innerText : "",
-
+                    parent_text: parent ? parent.innerText : null,
                     grandparent_text:
-                        grandparent ? grandparent.innerText : ""
+                        grandparent ? grandparent.innerText : null
                 };
             }
             """
         )
 
+        parent_text = context.get("parent_text")
+        grandparent_text = context.get("grandparent_text")
 
-        # Get immediate parent text.
-        parent_text = context.get("parent_text", "")
+        # --------------------------------------------------------
+        # Clean parent text
+        # --------------------------------------------------------
 
-        # Get grandparent text.
-        grandparent_text = context.get(
-            "grandparent_text",
-            ""
-        )
+        if parent_text:
 
+            parent_text = " ".join(
+                parent_text.split()
+            )
 
-        # Normalize whitespace.
-        parent_text = " ".join(
-            parent_text.split()
-        )
+            # Prevent extremely large context.
+            parent_text = parent_text[:500]
 
-        grandparent_text = " ".join(
-            grandparent_text.split()
-        )
+        # --------------------------------------------------------
+        # Clean grandparent text
+        # --------------------------------------------------------
 
+        if grandparent_text:
 
-        # Keep context reasonably small.
-        parent_text = parent_text[:250]
+            grandparent_text = " ".join(
+                grandparent_text.split()
+            )
 
-        grandparent_text = grandparent_text[:300]
+            grandparent_text = grandparent_text[:500]
 
+        # --------------------------------------------------------
+        # Prefer parent context
+        # --------------------------------------------------------
 
-        # Prefer immediate parent context.
         if parent_text:
             return parent_text
 
@@ -169,189 +211,442 @@ class PagePerception:
 
         return None
 
+    # ============================================================
+    # 3. NEW: GET FORM CONTEXT
+    # ============================================================
+
+    async def get_form_context(self, element):
+        """
+        Find the form relationship of an element.
+
+        IMPORTANT:
+        An HTML element can be related to a form in TWO ways.
+
+        CASE 1:
+            The element is physically inside <form>.
+
+            Example:
+
+                <form id="studentForm">
+                    <input name="name">
+                </form>
+
+        CASE 2:
+            The element is outside the <form>, but uses
+            the HTML 'form' attribute.
+
+            Example:
+
+                <form id="studentForm">
+                </form>
+
+                <input name="name" form="studentForm">
+
+        We must support BOTH cases.
+
+        This method ONLY COLLECTS FACTS.
+
+        It does NOT decide whether the element is relevant.
+        """
+
+        # --------------------------------------------------------
+        # Run JavaScript inside the browser.
+        # --------------------------------------------------------
+
+        form_info = await element.evaluate(
+            """
+            (element) => {
+
+                // =================================================
+                // CASE 1:
+                // Check whether the element is physically inside
+                // a <form> element.
+                // =================================================
+
+                let form = element.closest("form");
+
+                let relationship = null;
+
+                if (form) {
+
+                    relationship = "ancestor";
+
+                } else {
+
+                    // =============================================
+                    // CASE 2:
+                    // Check HTML's 'form' attribute.
+                    //
+                    // Example:
+                    //
+                    // <input form="studentForm">
+                    //
+                    // Find:
+                    //
+                    // <form id="studentForm">
+                    // =============================================
+
+                    const formId =
+                        element.getAttribute("form");
+
+                    if (formId) {
+
+                        form = document.getElementById(formId);
+
+                        if (
+                            form &&
+                            form.tagName.toLowerCase() === "form"
+                        ) {
+
+                            relationship = "form_attribute";
+
+                        } else {
+
+                            // The element has a form attribute,
+                            // but the referenced form does not exist
+                            // or is not actually a <form>.
+                            form = null;
+
+                        }
+                    }
+                }
+
+                // =================================================
+                // No form relationship found
+                // =================================================
+
+                if (!form) {
+
+                    return {
+                        associated: false,
+
+                        relationship: null,
+
+                        form_id: null,
+
+                        form_name: null,
+
+                        form_action: null,
+
+                        form_method: null,
+
+                        form_text: null
+                    };
+                }
+
+                // =================================================
+                // Form was found.
+                // Collect information about it.
+                // =================================================
+
+                return {
+
+                    associated: true,
+
+                    relationship: relationship,
+
+                    form_id:
+                        form.getAttribute("id"),
+
+                    form_name:
+                        form.getAttribute("name"),
+
+                    form_action:
+                        form.getAttribute("action"),
+
+                    form_method:
+                        form.getAttribute("method"),
+
+                    form_text:
+                        form.innerText
+                };
+            }
+            """
+        )
+
+        # ========================================================
+        # Clean form text
+        # ========================================================
+
+        form_text = form_info.get("form_text")
+
+        if form_text:
+
+            # Convert multiple spaces/newlines into
+            # normal single spaces.
+
+            form_text = " ".join(
+                form_text.split()
+            )
+
+            # Do not allow huge amounts of text
+            # to be sent to Gemini later.
+
+            form_text = form_text[:500]
+
+        # ========================================================
+        # Return structured form information
+        # ========================================================
+
+        return {
+
+            "associated":
+                form_info.get("associated", False),
+
+            "relationship":
+                form_info.get("relationship"),
+
+            "form_id":
+                form_info.get("form_id"),
+
+            "form_name":
+                form_info.get("form_name"),
+
+            "form_action":
+                form_info.get("form_action"),
+
+            "form_method":
+                form_info.get("form_method"),
+
+            "form_text":
+                form_text
+        }
+
+    # ============================================================
+    # 4. CHECK ACTIONABILITY
+    # ============================================================
 
     async def is_actionable(self, element):
         """
-        Determine whether an element is currently usable.
+        Check whether an element is currently usable.
 
-        This is the important improvement.
+        We require:
 
-        An element can exist in the DOM but still be:
-        - hidden
-        - disabled
-        - not currently usable
+            visible == True
+            enabled == True
 
-        We don't want such elements to be sent to Gemini
-        as possible actions.
+        This prevents AURA from trying to interact with hidden
+        or disabled elements.
         """
 
-        # -------------------------------------------------
-        # CHECK VISIBILITY
-        # -------------------------------------------------
-        # Playwright checks whether the element is currently
-        # visible to the user.
-        if not await element.is_visible():
-            return False
-
-
-        # -------------------------------------------------
-        # CHECK ENABLED STATE
-        # -------------------------------------------------
-        # Disabled form controls should not be considered
-        # actionable.
         try:
 
-            if not await element.is_enabled():
-                return False
+            visible = await element.is_visible()
+
+            enabled = await element.is_enabled()
+
+            return visible and enabled
 
         except Exception:
 
-            # Some non-form elements may not support the
-            # enabled-state check in the same way.
-            pass
+            # If Playwright cannot inspect the element,
+            # treat it as non-actionable.
 
+            return False
 
-        # If the element is visible and usable,
-        # consider it actionable.
-        return True
-
+    # ============================================================
+    # 5. GET INPUT ROLE
+    # ============================================================
 
     async def get_input_role(self, element):
         """
-        Determine the semantic role of an input element.
+        Determine what kind of interactive element this is.
 
-        We first check an explicit ARIA role.
+        Examples:
 
-        If no role exists, we infer it from the HTML input type.
+            text input      -> textbox
+            number input    -> spinbutton
+            checkbox        -> checkbox
+            radio           -> radio
+            select          -> combobox
+            textarea        -> textbox
+            button          -> button
+            link             -> link
         """
 
-        # Check explicit ARIA role.
-        role = await element.get_attribute("role")
+        tag_name = await element.evaluate(
+            "(element) => element.tagName.toLowerCase()"
+        )
 
-        if role:
-            return role
+        # --------------------------------------------------------
+        # INPUT
+        # --------------------------------------------------------
 
+        if tag_name == "input":
 
-        # Get native input type.
-        input_type = await element.get_attribute("type")
+            input_type = (
+                await element.get_attribute("type")
+            )
 
-        if input_type in ["text", "email", "password", "search"]:
+            input_type = (
+                input_type.lower()
+                if input_type
+                else "text"
+            )
+
+            role_map = {
+
+                "text": "textbox",
+
+                "email": "textbox",
+
+                "password": "textbox",
+
+                "search": "textbox",
+
+                "tel": "textbox",
+
+                "url": "textbox",
+
+                "number": "spinbutton",
+
+                "radio": "radio",
+
+                "checkbox": "checkbox",
+
+                "date": "textbox",
+
+                "datetime-local": "textbox",
+
+                "month": "textbox",
+
+                "week": "textbox",
+
+                "time": "textbox",
+
+                "file": "file"
+            }
+
+            return role_map.get(
+                input_type,
+                "textbox"
+            )
+
+        # --------------------------------------------------------
+        # TEXTAREA
+        # --------------------------------------------------------
+
+        if tag_name == "textarea":
+
             return "textbox"
 
-        if input_type == "number":
-            return "spinbutton"
+        # --------------------------------------------------------
+        # SELECT
+        # --------------------------------------------------------
 
-        if input_type == "radio":
-            return "radio"
+        if tag_name == "select":
 
-        if input_type == "checkbox":
-            return "checkbox"
+            return "combobox"
 
-        if input_type == "date":
-            return "textbox"
+        # --------------------------------------------------------
+        # BUTTON
+        # --------------------------------------------------------
 
-        return "textbox"
+        if tag_name == "button":
 
+            return "button"
+
+        # --------------------------------------------------------
+        # LINK
+        # --------------------------------------------------------
+
+        if tag_name == "a":
+
+            return "link"
+
+        # --------------------------------------------------------
+        # ARIA ROLE
+        # --------------------------------------------------------
+
+        aria_role = await element.get_attribute("role")
+
+        if aria_role:
+
+            return aria_role
+
+        return "unknown"
+
+    # ============================================================
+    # 6. GET ALL ELEMENTS
+    # ============================================================
 
     async def get_elements(self):
         """
-        Detect currently actionable interactive elements.
+        Scan the webpage and return actionable interactive elements.
 
-        Important:
-        We DO NOT remove duplicate-looking elements here.
+        AURA currently looks for:
 
-        If two different DOM elements exist, both can remain.
+            input
+            textarea
+            select
+            button
+            a
 
-        Example:
+        It also checks ARIA interactive elements.
 
-        e9  -> fname
-        e12 -> fname
+        Each element receives an AURA ID:
 
-        They are preserved because they may represent
-        different physical fields.
+            e1
+            e2
+            e3
+            ...
+
+        IMPORTANT:
+        We DO NOT remove elements merely because two elements
+        have the same label or name.
+
+        Two separate DOM elements may legitimately represent
+        two separate fields.
         """
 
-        # Reset the element map for the current perception.
+        # --------------------------------------------------------
+        # Reset element map before every perception cycle.
+        # --------------------------------------------------------
+
         self.element_map = {}
 
-        # Generate our own IDs.
+        elements = []
+
         element_counter = 1
 
+        # ========================================================
+        # PART 1:
+        # Standard HTML interactive elements
+        # ========================================================
 
-        # -------------------------------------------------
-        # FIND NATIVE INTERACTIVE ELEMENTS
-        # -------------------------------------------------
         locator = self.page.locator(
             "input, textarea, select, button, a"
         )
 
         count = await locator.count()
 
-
         for index in range(count):
 
             element = locator.nth(index)
 
+            # ----------------------------------------------------
+            # Ignore hidden/disabled elements.
+            # ----------------------------------------------------
 
-            # -------------------------------------------------
-            # IMPORTANT:
-            # IGNORE HIDDEN/NON-ACTIONABLE ELEMENTS
-            # -------------------------------------------------
             if not await self.is_actionable(element):
                 continue
 
+            # ----------------------------------------------------
+            # Create AURA element ID.
+            # ----------------------------------------------------
 
-            # Get HTML tag.
-            tag = await element.evaluate(
-                "(element) => element.tagName"
-            )
-
-            tag = tag.upper()
-
-
-            # -------------------------------------------------
-            # DETERMINE ROLE
-            # -------------------------------------------------
-            if tag == "INPUT":
-
-                role = await self.get_input_role(
-                    element
-                )
-
-            elif tag == "TEXTAREA":
-
-                role = "textbox"
-
-            elif tag == "SELECT":
-
-                role = "combobox"
-
-            elif tag == "BUTTON":
-
-                role = "button"
-
-            elif tag == "A":
-
-                role = "link"
-
-            else:
-
-                continue
-
-
-            # Create our internal element ID.
             element_id = f"e{element_counter}"
 
             element_counter += 1
 
+            # ----------------------------------------------------
+            # Get basic element information.
+            # ----------------------------------------------------
 
-            # Get useful information.
-            label = await self.get_label(
-                element
-            )
+            role = await self.get_input_role(element)
 
-            context = await self.get_context(
-                element
+            input_type = await element.get_attribute(
+                "type"
             )
 
             name = await element.get_attribute(
@@ -366,38 +661,79 @@ class PagePerception:
                 "required"
             )
 
+            # ----------------------------------------------------
+            # Get semantic information.
+            # ----------------------------------------------------
 
-            # Store element information.
+            label = await self.get_label(element)
+
+            context = await self.get_context(element)
+
+            # ----------------------------------------------------
+            # NEW:
+            # Get form relationship.
+            # ----------------------------------------------------
+
+            form_context = await self.get_form_context(
+                element
+            )
+
+            # ----------------------------------------------------
+            # Store actual Playwright element internally.
+            #
+            # BrowserActions will later use this mapping.
+            # ----------------------------------------------------
+
             self.element_map[element_id] = {
                 "element": element,
                 "id": element_id,
                 "role": role,
-                "type": await element.get_attribute(
-                    "type"
-                ),
+                "type": input_type,
                 "name": name,
                 "label": label,
                 "placeholder": placeholder,
                 "required": bool(required),
                 "context": {
                     "parent_text": context
-                }
+                },
+                "form_context": form_context
             }
 
+            # ----------------------------------------------------
+            # Return CLEAN information.
+            #
+            # We do not return the Playwright object because
+            # Gemini cannot use it.
+            # ----------------------------------------------------
 
-        # -------------------------------------------------
-        # FIND ARIA INTERACTIVE ELEMENTS
-        # -------------------------------------------------
-        #
-        # Some modern websites don't use native HTML
-        # elements. They use things like:
-        #
-        # <div role="button">
-        # <div role="textbox">
-        # <div role="checkbox">
-        #
-        # So we inspect those as well.
-        #
+            elements.append({
+
+                "id": element_id,
+
+                "role": role,
+
+                "type": input_type,
+
+                "name": name,
+
+                "label": label,
+
+                "placeholder": placeholder,
+
+                "required": bool(required),
+
+                "context": {
+                    "parent_text": context
+                },
+
+                "form_context": form_context
+            })
+
+        # ========================================================
+        # PART 2:
+        # ARIA interactive elements
+        # ========================================================
+
         aria_locator = self.page.locator(
             '[role="button"], '
             '[role="textbox"], '
@@ -408,32 +744,67 @@ class PagePerception:
 
         aria_count = await aria_locator.count()
 
-
         for index in range(aria_count):
 
             element = aria_locator.nth(index)
 
+            # ----------------------------------------------------
+            # Ignore hidden/disabled ARIA elements.
+            # ----------------------------------------------------
 
-            # Ignore hidden ARIA elements too.
             if not await self.is_actionable(element):
                 continue
 
+            # ----------------------------------------------------
+            # Avoid adding the same physical element twice.
+            #
+            # Some native elements may also have an ARIA role.
+            # ----------------------------------------------------
 
-            role = await element.get_attribute(
-                "role"
-            )
+            already_exists = False
+
+            for existing in self.element_map.values():
+
+                existing_element = existing["element"]
+
+                try:
+
+                    same_element = await element.evaluate(
+                        """
+                        (element, other) => element === other
+                        """,
+                        existing_element
+                    )
+
+                    if same_element:
+
+                        already_exists = True
+
+                        break
+
+                except Exception:
+
+                    pass
+
+            if already_exists:
+                continue
+
+            # ----------------------------------------------------
+            # Create AURA ID.
+            # ----------------------------------------------------
 
             element_id = f"e{element_counter}"
 
             element_counter += 1
 
+            # ----------------------------------------------------
+            # Collect information.
+            # ----------------------------------------------------
 
-            label = await self.get_label(
-                element
-            )
+            role = await self.get_input_role(element)
 
-            context = await self.get_context(
-                element
+            input_type = await element.get_attribute(
+                "type"
             )
 
             name = await element.get_attribute(
@@ -448,69 +819,105 @@ class PagePerception:
                 "required"
             )
 
+            label = await self.get_label(element)
+
+            context = await self.get_context(element)
+
+            # ----------------------------------------------------
+            # NEW:
+            # Get form relationship for ARIA elements too.
+            # ----------------------------------------------------
+
+            form_context = await self.get_form_context(
+                element
+            )
+
+            # ----------------------------------------------------
+            # Store actual Playwright element.
+            # ----------------------------------------------------
 
             self.element_map[element_id] = {
+
                 "element": element,
+
                 "id": element_id,
+
                 "role": role,
-                "type": await element.get_attribute(
-                    "type"
-                ),
+
+                "type": input_type,
+
                 "name": name,
+
                 "label": label,
+
                 "placeholder": placeholder,
+
                 "required": bool(required),
+
                 "context": {
                     "parent_text": context
-                }
+                },
+
+                "form_context": form_context
             }
 
-
-        # -------------------------------------------------
-        # RETURN CLEAN ELEMENT INFORMATION
-        # -------------------------------------------------
-        #
-        # Don't expose the actual Playwright objects to
-        # Gemini.
-        #
-        # Gemini only needs descriptive information.
-        #
-        elements = []
-
-        for element_id, data in self.element_map.items():
+            # ----------------------------------------------------
+            # Add clean information to result.
+            # ----------------------------------------------------
 
             elements.append({
-                "id": data["id"],
-                "role": data["role"],
-                "type": data["type"],
-                "name": data["name"],
-                "label": data["label"],
-                "placeholder": data["placeholder"],
-                "required": data["required"],
-                "context": data["context"]
+
+                "id": element_id,
+
+                "role": role,
+
+                "type": input_type,
+
+                "name": name,
+
+                "label": label,
+
+                "placeholder": placeholder,
+
+                "required": bool(required),
+
+                "context": {
+                    "parent_text": context
+                },
+
+                "form_context": form_context
             })
 
+        # ========================================================
+        # Return all discovered elements.
+        # ========================================================
 
         return elements
 
+    # ============================================================
+    # 7. GET ACTUAL PLAYWRIGHT ELEMENT
+    # ============================================================
 
     def get_element(self, element_id):
         """
-        Return the actual Playwright element associated
-        with an AURA element ID.
+        Convert an AURA element ID such as 'e5'
+        back into the actual Playwright element.
 
         Example:
 
-        e9
-        ↓
-        actual Playwright input element
+            AURA:
+                e5
+
+            BrowserActions:
+                get_element("e5")
+
+            Result:
+                actual Playwright locator/element
         """
 
-        data = self.element_map.get(
-            element_id
-        )
+        data = self.element_map.get(element_id)
 
-        if data is None:
+        if not data:
             return None
 
         return data["element"]
